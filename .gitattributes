@@ -1,0 +1,15 @@
+python filter=lfs diff=lfs merge=lfs -text
+Texts filter=lfs diff=lfs merge=lfs -text
+poppler filter=lfs diff=lfs merge=lfs -text
+requirements.txt filter=lfs diff=lfs merge=lfs -text
+setup.ps1 filter=lfs diff=lfs merge=lfs -text
+tasks filter=lfs diff=lfs merge=lfs -text
+worker.py filter=lfs diff=lfs merge=lfs -text
+__pycache__ filter=lfs diff=lfs merge=lfs -text
+app.py filter=lfs diff=lfs merge=lfs -text
+config.py filter=lfs diff=lfs merge=lfs -text
+readme.pdf filter=lfs diff=lfs merge=lfs -text
+run.bat filter=lfs diff=lfs merge=lfs -text
+tesseract filter=lfs diff=lfs merge=lfs -text
+tasks/bdd/metadonnee.duckdb filter=lfs diff=lfs merge=lfs -text
+tasks/csv/métadonnées.csv filter=lfs diff=lfs merge=lfs -text
