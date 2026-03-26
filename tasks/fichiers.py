@@ -1,3 +1,4 @@
+from concurrent.futures import ProcessPoolExecutor
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 import time
@@ -19,6 +20,7 @@ from pdf2image import convert_from_path
 from docx2pdf import convert
 import pythoncom
 from odt_pdf.odt_to_pdf import convert_odt_to_pdf
+from tqdm import tqdm
 
 
 # Chemin de téléchargement des fichiers
@@ -98,105 +100,95 @@ def ensure_extract_files():
 
 
 
-def find_doc_with_only_images():
-    base_path = Path(DOWNLOAD_PATH)
-    docx_files = list(base_path.rglob("*.docx"))
-    odt_files = list(base_path.rglob("*.odt"))
-
+def find_doc_with_only_images(path):
+  
+    errors= set()
     documents = []
-    
-    with alive_bar(len(docx_files), title="Analyse des fichiers docx...") as bar:
-        for path in docx_files:
-            total_text = 0
+
+    try:
+        with zipfile.ZipFile(path, 'r') as file:
+            names = file.namelist()
+
+            text = ""
             image_count = 0
-            paragraphs_with_only_images = 0
+            total_text = 0
 
-            doc = Document(path)
-            for para in doc.paragraphs:
-                text = para.text.strip()
-                total_text += len(text)
+            # --- DOCX ---
+            if "word/document.xml" in names:
+                text = file.read("word/document.xml").decode("utf-8", errors="ignore")
+                image_count = len([f for f in names if f.startswith("word/media/")])
 
-                has_image = any(run.element.xpath('.//*[local-name()="drawing"]') for run in para.runs)
+            # --- ODT ---
+            elif "content.xml" in names:
+                text = file.read("content.xml").decode("utf-8", errors="ignore")
+                image_count = len([f for f in names if f.startswith("Pictures/")])
 
-                if has_image:
-                        image_count += 1
+            total_text = len(text.strip())
 
-                if has_image and not text:
-                    paragraphs_with_only_images += 1
-                    
-            if image_count > 0 and total_text < 250:
-                documents.append((path))
             
-            bar()
+            if image_count > 0 and total_text < 250:
+                documents.append(path)
+            
+        
+    except Exception as err:
+        print(f"Erreur {err} lors de l'analyse du fichiers odt : {path}")
+        errors.add(str(path))
 
-    with alive_bar(len(odt_files), title="Analyse des fichiers odt...") as bar:
-        for path in odt_files:
-            with zipfile.ZipFile(path, 'r') as file:
 
-                text = ""
-                if "content.xml" in file.namelist():
-                    text = file.read("content.xml").decode("utf-8", errors="ignore")
-
-                total_text = len(text.strip())
-
-                
-                image_count = len([f for f in file.namelist() if f.startswith("Pictures/")])
-
-                if image_count > 0 and total_text < 250:
-                    documents.append((path))
-
-                bar()
+    if errors:
+        with open("log_errors.txt", "w") as log_file:
+            for error in errors:
+                log_file.write(f"{error}\n")
 
     return documents      
         
 
-def ocr_documents_with_only_images(documents):
-    with alive_bar(len(documents), title="OCR des fichiers contenant uniquement des images...") as bar:
-        for path in documents:
-            print(f"Traitement du fichier : {path}")
-            pythoncom.CoInitialize()
-            if path.suffix == ".docx":
-                convert(path, path.with_suffix(".pdf"))
-            elif path.suffix == ".odt":
-                convert_odt_to_pdf(path, path.with_suffix(".pdf"))
+def ocr_documents_with_only_images(path):
+    pythoncom.CoInitialize()
+    print(f"Traitement OCR du document : {path})")
+    if path.suffix == ".docx":
+        convert(path, path.with_suffix(".pdf"))
+    elif path.suffix == ".odt":
+        convert_odt_to_pdf(path, path.with_suffix(".pdf"))
 
-            text_pages = convert_from_path(path.with_suffix(".pdf"), dpi=300,poppler_path="poppler\\Library\\bin")
-            extracted_text = []
-            for page in text_pages:
-                text = pytesseract.image_to_string(page).strip()
-                extracted_text.append(text)
-            
-            with open(path.with_suffix(".txt"), "w", encoding="utf-8") as f:
-                f.write("\n".join(extracted_text))
-                    
-                
-                pythoncom.CoUninitialize()
-                path.with_suffix(".pdf").unlink()
-                path.unlink()
+    text_pages = convert_from_path(path.with_suffix(".pdf"),dpi=200,poppler_path="poppler\\Library\\bin")
 
+    extracted_text = []
+    for page in text_pages:
+        text = pytesseract.image_to_string(page, config="--oem 3 --psm 6").strip()
+        extracted_text.append(text)
 
-            bar()
+    with open(path.with_suffix(".txt"), "w", encoding="utf-8") as f:
+        f.write("\n".join(extracted_text))
+
+    path.with_suffix(".pdf").unlink(missing_ok=True)
+    path.unlink(missing_ok=True)
+
+    pythoncom.CoUninitialize()
                 
                                 
 
-def docx_to_txt(docx_path, txt_path):
+def docx_to_txt(path):
+    txt_path = path.with_suffix(".txt")
     try:
         # Vérification de l'existence du fichier
-        if not os.path.isfile(docx_path):
-            raise FileNotFoundError(f"Fichier introuvable : {docx_path}")
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"Fichier introuvable : {path}")
 
-        text = docx2txt.process(docx_path)
+        text = docx2txt.process(path)
         with open(txt_path, "w", encoding="utf-8") as f:
             f.write(text)
       
+        path.unlink()
     except Exception as err:
         print(f"Erreur lors de la conversion : {err}")
         
 
-def odt_to_txt(odt_path, txt_path):       
+def odt_to_txt(path):       
+    txt_path = path.with_suffix(".txt")
     try:
         # Lecture du fichier ODT
-        doc = load(odt_path)
+        doc = load(path)
         paragraphs = doc.getElementsByType(P)
 
         full_text = []
@@ -211,66 +203,59 @@ def odt_to_txt(odt_path, txt_path):
         # Écriture dans le fichier TXT
         with open(txt_path, "w", encoding="utf-8") as txt_file:
             txt_file.write("\n".join(full_text))
-
+        
+        path.unlink()
     except Exception as err:
         print(f"Erreur lors de la conversion : {err}")
         
         
         
 def ensure_conversion_txt():
-    cpt_fichier=0
-    cpt_doublon=0
-    cpt_vide=0
-    doublon = set()
+   
     base_path = Path(DOWNLOAD_PATH)
+    docx_files = list(base_path.rglob("*.docx"))
+    odt_files = list(base_path.rglob("*.odt"))
+    doc_paths = docx_files + odt_files
 
-    documents_with_only_images = find_doc_with_only_images()
-    ocr_documents_with_only_images(documents_with_only_images)
+   
+    # Filtrage
+    with ProcessPoolExecutor() as executor:
+        docs = list(tqdm(executor.map(find_doc_with_only_images, doc_paths,chunksize=10),total=len(doc_paths),desc="Filtrage des documents"))
+
+    docs = [d for d in docs if d]  # IMPORTANT
 
 
-    docx_files = [
-        path for path in base_path.rglob("*.docx")
-        if path.is_file() and not path.with_suffix(".txt").exists()
-    ]
+    #  OCR
+    with ProcessPoolExecutor() as executor:
+        results = list(tqdm(executor.map(ocr_documents_with_only_images, docs,chunksize=10),total=len(docs),desc="Lancement de l'OCR"))
+        
+    # 
 
-    odt_files = [
-        path for path in base_path.rglob("*.odt")
-        if path.is_file() and not path.with_suffix(".txt").exists()
-    ]
+    # docx_files = [
+    #     path for path in base_path.rglob("*.docx")
+    #     if path.is_file() and not path.with_suffix(".txt").exists()
+    # ]
+
+    # odt_files = [
+    #     path for path in base_path.rglob("*.odt")
+    #     if path.is_file() and not path.with_suffix(".txt").exists()
+    # ]
+
 
 
     if not docx_files and not odt_files:
         print("Aucun fichier à convertir.")
         return
 
-    with alive_bar(len(docx_files), title="Conversion docx ...") as bar:
-        for path in docx_files:
-            txt_path = path.with_suffix(".txt")
-            docx_to_txt(str(path), str(txt_path))
-            path.unlink()
-            bar()
-
-    with alive_bar(len(odt_files), title="Conversion odt ...") as bar:
-        for path in odt_files:
-            txt_path = path.with_suffix(".txt")
-            odt_to_txt(str(path), str(txt_path))
-            path.unlink()
-            bar()
-
-    
-    for path in base_path.rglob("*")  :
-
-        if path.is_file() and path.suffix == ".txt":
-            cpt_fichier+=1
-        
-        if path.name in doublon:
-            cpt_doublon+=1
-        else:
-            doublon.add(path.name)
-
-        if  path.is_file and path.stat().st_size < 250:
-            cpt_vide+=1
+    with ProcessPoolExecutor() as executor:
+        list(tqdm(executor.map(docx_to_txt,str(docx_files),chunksize=10), total=len(docx_files), desc="Conversion docx ..."))
+         
             
+    with ProcessPoolExecutor() as executor:
+        list(tqdm(executor.map(odt_to_txt,str(odt_files),chunksize=10), total=len(odt_files), desc="Conversion odt ..."))
+         
+            
+    
+    print(f"Conversion terminée.")
 
-    print(f"Conversion terminée, nombre de fichiers: {cpt_fichier}, nombre de doublons : {cpt_doublon}, nombre de fichiers vide : {cpt_vide}")
-           
+ 
