@@ -202,6 +202,15 @@ def get_csv():
 
     accords_infos["siren"] = accords_infos["siret"].astype(str).str[:9]
 
+    accords_infos["plan_action"] = accords_infos["plan_action"].map({True: "Oui", False: "Non"})
+    accords_infos["charte"] = accords_infos["charte"].map({True: "Oui", False: "Non"})
+    accords_infos["nao"] = accords_infos["nao"].map({True: "Oui", False: "Non"})
+    accords_infos["proces_verbal"] = accords_infos["proces_verbal"].map({True: "Oui", False: "Non"})    
+    # accords_infos["groupe"] = accords_infos["siren"].map(lambda x: "Groupe" if str(x).startswith("356") else "Indépendant")
+    accords_infos["groupe"] = accords_infos["groupe"].map({True: "Oui", False: "Non"})
+    accords_infos["ues"] = accords_infos["ues"].map({True: "Oui", False: "Non"})
+
+
     
     base_dir = os.path.dirname(os.path.abspath(__file__))
     bdd_dir = os.path.join(base_dir, "csv")

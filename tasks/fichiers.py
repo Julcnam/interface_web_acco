@@ -1,4 +1,4 @@
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 import time
@@ -21,7 +21,9 @@ from docx2pdf import convert
 import pythoncom
 from odt_pdf.odt_to_pdf import convert_odt_to_pdf
 from tqdm import tqdm
-
+import re
+import subprocess
+import gc
 
 # Chemin de téléchargement des fichiers
 download_path = DOWNLOAD_PATH
@@ -101,70 +103,60 @@ def ensure_extract_files():
 
 
 def find_doc_with_only_images(path):
-  
-    errors= set()
-    documents = []
-
     try:
+        if not zipfile.is_zipfile(path):
+            return False
+
         with zipfile.ZipFile(path, 'r') as file:
             names = file.namelist()
 
             text = ""
             image_count = 0
-            total_text = 0
 
-            # --- DOCX ---
             if "word/document.xml" in names:
                 text = file.read("word/document.xml").decode("utf-8", errors="ignore")
                 image_count = len([f for f in names if f.startswith("word/media/")])
 
-            # --- ODT ---
             elif "content.xml" in names:
                 text = file.read("content.xml").decode("utf-8", errors="ignore")
                 image_count = len([f for f in names if f.startswith("Pictures/")])
 
-            total_text = len(text.strip())
+            clean_text = re.sub("<[^<]+?>", "", text)
+            total_text = len(clean_text.strip())
 
-            
-            if image_count > 0 and total_text < 250:
-                documents.append(path)
-            
-        
+            return image_count > 0 and total_text < 500
+
     except Exception as err:
-        print(f"Erreur {err} lors de l'analyse du fichiers odt : {path}")
-        errors.add(str(path))
+        print(f"Erreur {err} lors de l'analyse : {path}")
+        return False
 
-
-    if errors:
-        with open("log_errors.txt", "w") as log_file:
-            for error in errors:
-                log_file.write(f"{error}\n")
-
-    return documents      
+       
         
 
 def ocr_documents_with_only_images(path):
     pythoncom.CoInitialize()
-    print(f"Traitement OCR du document : {path})")
-    if path.suffix == ".docx":
-        convert(path, path.with_suffix(".pdf"))
-    elif path.suffix == ".odt":
-        convert_odt_to_pdf(path, path.with_suffix(".pdf"))
+    try:
+        # print(f"Traitement OCR du document : {path}")
 
-    text_pages = convert_from_path(path.with_suffix(".pdf"),dpi=200,poppler_path="poppler\\Library\\bin")
+        text_pages = convert_from_path(path.with_suffix(".pdf"),dpi=200,poppler_path="poppler\\Library\\bin")
 
-    extracted_text = []
-    for page in text_pages:
-        text = pytesseract.image_to_string(page, config="--oem 3 --psm 6").strip()
-        extracted_text.append(text)
+        extracted_text = []
+        for page in text_pages:
+            text = pytesseract.image_to_string(page, config="--oem 3 --psm 6").strip()
+            extracted_text.append(text)
 
-    with open(path.with_suffix(".txt"), "w", encoding="utf-8") as f:
-        f.write("\n".join(extracted_text))
+            del page
+            gc.collect()
 
-    path.with_suffix(".pdf").unlink(missing_ok=True)
-    path.unlink(missing_ok=True)
+        with open(path.with_suffix(".txt"), "w", encoding="utf-8") as f:
+            f.write("\n".join(extracted_text))
 
-    pythoncom.CoUninitialize()
+        path.with_suffix(".pdf").unlink(missing_ok=True)
+        path.with_suffix(".docx").unlink(missing_ok=True)
+        path.with_suffix(".odt").unlink(missing_ok=True)
+        path.unlink(missing_ok=True)
+    finally:
+        pythoncom.CoUninitialize()
                 
                                 
 
@@ -207,8 +199,29 @@ def odt_to_txt(path):
         path.unlink()
     except Exception as err:
         print(f"Erreur lors de la conversion : {err}")
-        
-        
+
+
+base_dir = Path(__file__).resolve().parent
+soffice_path = base_dir / "libreOffice" / "program" / "soffice.exe" 
+def convert_libreoffice(path):
+    result = subprocess.run(
+        [
+            str(soffice_path),
+            "--headless",
+            "--convert-to", "pdf",
+            "--outdir", str(path.parent),
+            str(path)
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+
+    if result.returncode != 0:
+        print("ERROR:", path)
+        print(result.stderr.decode())
+        return None
+
+    return path.with_suffix(".pdf")
         
 def ensure_conversion_txt():
    
@@ -217,45 +230,59 @@ def ensure_conversion_txt():
     odt_files = list(base_path.rglob("*.odt"))
     doc_paths = docx_files + odt_files
 
-   
+    latest_paths = {}
+
+    for path in doc_paths:
+        key = path.name
+
+        if not key in latest_paths:
+            latest_paths[key] = path
+        else:
+            if path.stat().st_mtime > latest_paths[key].stat().st_mtime:
+                latest_paths[key] = path
+  
+    doc_paths = list(latest_paths.values())
+    docx_files = [p for p in doc_paths if p.suffix == ".docx"]
+    odt_files = [p for p in doc_paths if p.suffix == ".odt"]
+
     # Filtrage
     with ProcessPoolExecutor() as executor:
-        docs = list(tqdm(executor.map(find_doc_with_only_images, doc_paths,chunksize=10),total=len(doc_paths),desc="Filtrage des documents"))
+        results = list(tqdm(executor.map(find_doc_with_only_images, doc_paths, chunksize=10),total=len(doc_paths),desc="Filtrage des documents"))
 
-    docs = [d for d in docs if d]  # IMPORTANT
+        docs = [p for p, keep in zip(doc_paths, results) if keep]
 
+    # # OCR
+    pdf = []
+    with alive_bar(len(docs), title="Conversion PDF") as bar:
+        for path in docs:
+            if not path.with_suffix(".pdf").exists():
+                new_pdf = convert_libreoffice(path)
 
-    #  OCR
+                if new_pdf is not None:
+                    pdf.append(new_pdf)
+
+            
+            else: 
+                new_pdf = path.with_suffix(".pdf")
+                pdf.append(new_pdf)
+
+            bar()
+
     with ProcessPoolExecutor() as executor:
-        results = list(tqdm(executor.map(ocr_documents_with_only_images, docs,chunksize=10),total=len(docs),desc="Lancement de l'OCR"))
-        
-    # 
+        list(tqdm(executor.map(ocr_documents_with_only_images, pdf),total=len(pdf),desc="Lancement de l'OCR"))
+    
 
-    # docx_files = [
-    #     path for path in base_path.rglob("*.docx")
-    #     if path.is_file() and not path.with_suffix(".txt").exists()
-    # ]
-
-    # odt_files = [
-    #     path for path in base_path.rglob("*.odt")
-    #     if path.is_file() and not path.with_suffix(".txt").exists()
-    # ]
-
-
-
-    if not docx_files and not odt_files:
+    if not doc_paths :
         print("Aucun fichier à convertir.")
         return
 
     with ProcessPoolExecutor() as executor:
-        list(tqdm(executor.map(docx_to_txt,str(docx_files),chunksize=10), total=len(docx_files), desc="Conversion docx ..."))
-         
-            
-    with ProcessPoolExecutor() as executor:
-        list(tqdm(executor.map(odt_to_txt,str(odt_files),chunksize=10), total=len(odt_files), desc="Conversion odt ..."))
-         
-            
-    
+        if docx_files:
+            list(tqdm(executor.map(docx_to_txt, docx_files,chunksize=10), total=len(docx_files), desc="Conversion docx ..."))
+        if odt_files:
+            list(tqdm(executor.map(odt_to_txt, odt_files,chunksize=10), total=len(odt_files), desc="Conversion odt ..."))
+
     print(f"Conversion terminée.")
 
+ 
  
